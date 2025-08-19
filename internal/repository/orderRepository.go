@@ -8,12 +8,18 @@ import (
 	"github.com/RaikyD/wb-orders-service/internal/logger"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type OrderRepo interface {
 	AddOrder(ctx context.Context, order *domain.Order) error
 	GetOrderById(ctx context.Context, id uuid.UUID) (*domain.Order, error)
+	ListRecentPayloads(ctx context.Context, limit int) ([]struct {
+		ID      uuid.UUID
+		Payload []byte
+	},
+		error)
 }
 
 type OrderRepository struct {
@@ -23,6 +29,8 @@ type OrderRepository struct {
 func NewOrderRepository(p *pgxpool.Pool) *OrderRepository {
 	return &OrderRepository{pool: p}
 }
+
+var ErrOrderAlreadyExists = errors.New("order already exists")
 
 func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
 	payload, err := json.Marshal(o)
@@ -69,7 +77,21 @@ func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
 	).Scan(&orderID)
 
 	if err != nil {
-		logger.Warn("Error occured while working with ordersTable")
+		//обрабатываем уникальное нарушение по order_uid
+		var pgErr *pgconn.PgError
+		// 23505 код для обозначение дупликата
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Заказ уже есть — достанем его id, чтобы вызвать позже кэширование
+			if err2 := p.pool.QueryRow(ctx,
+				`SELECT id FROM wb.orders WHERE order_uid = $1`, o.OrderUID,
+			).Scan(&orderID); err2 == nil {
+				o.OrderID = orderID
+				return ErrOrderAlreadyExists
+			}
+			return ErrOrderAlreadyExists
+		}
+
+		logger.Warn("insert into wb.orders failed")
 		return err
 	}
 
@@ -119,7 +141,7 @@ func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
 		return err
 	}
 
-	// 4) items — много к одному; используем Batch для эффективности
+	//working with items table
 	if len(o.Items) > 0 {
 		batch := &pgx.Batch{}
 		for _, it := range o.Items {
@@ -271,4 +293,43 @@ func (p *OrderRepository) GetOrderById(ctx context.Context, id uuid.UUID) (*doma
 	order.OrderID = id
 
 	return order, nil
+}
+
+func (p *OrderRepository) ListRecentPayloads(ctx context.Context, limit int) ([]struct {
+	ID      uuid.UUID
+	Payload []byte
+},
+	error,
+) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, payload
+			FROM wb.orders
+			ORDER BY created_at DESC
+			LIMIT $1
+			`, limit)
+	if err != nil {
+		logger.Warn("Error at gettings cache from db")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []struct {
+		ID      uuid.UUID
+		Payload []byte
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var payload []byte
+		if err := rows.Scan(&id, &payload); err != nil {
+			return nil, err
+		}
+		out = append(out, struct {
+			ID      uuid.UUID
+			Payload []byte
+		}{ID: id, Payload: payload})
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return out, nil
 }
