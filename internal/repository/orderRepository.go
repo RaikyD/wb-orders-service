@@ -3,12 +3,12 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/RaikyD/wb-orders-service/internal/domain"
 	"github.com/RaikyD/wb-orders-service/internal/logger"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"log"
 )
 
 type OrderRepo interface {
@@ -20,22 +20,24 @@ type OrderRepository struct {
 	pool *pgxpool.Pool
 }
 
-func NewOrderRepository(p pgxpool.Pool) (*OrderRepository, error) {
-	return &OrderRepository{pool: &p}, nil
+func NewOrderRepository(p *pgxpool.Pool) *OrderRepository {
+	return &OrderRepository{pool: p}
 }
 
 func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
-	payload, err := json.Marshal(&o)
+	payload, err := json.Marshal(o)
 	if err != nil {
 		logger.Warn("Error while marshalling json-data")
+		return err
 	}
 
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		log.Println("Error while starting transaction")
+		logger.Info("")
+		return err
 	}
 
-	// Comment then explanation
+	// If error occur while operations with db during tx we rollback everything
 	defer func() {
 		if tx != nil {
 			tx.Rollback(ctx)
@@ -76,7 +78,7 @@ func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
 		`INSERT INTO wb.delivery (order_id, name, phone, zip, city, address, region, email)
 			 VALUES
 			     ($1, $2, $3, $4, $5, $6, $7, $8)
-			`, o.OrderID,
+			`, orderID,
 		o.Delivery.Name,
 		o.Delivery.Phone,
 		o.Delivery.Zip,
@@ -149,8 +151,124 @@ func (p *OrderRepository) AddOrder(ctx context.Context, o *domain.Order) error {
 
 	if err = tx.Commit(ctx); err != nil {
 		logger.Warn("Error while commiting tx")
+		return err
 	}
 	tx = nil
 	o.OrderID = orderID
 	return nil
+}
+
+func (p *OrderRepository) GetOrderById(ctx context.Context, id uuid.UUID) (*domain.Order, error) {
+	order := &domain.Order{}
+	err := p.pool.QueryRow(ctx,
+		`
+		  SELECT order_uid, track_number, entry, locale, internal_signature,
+				 customer_id, delivery_service, shardkey, sm_id, date_created, oof_shard
+		  FROM wb.orders WHERE id = $1
+		`, id).Scan(
+		&order.OrderUID,
+		&order.TrackNumber,
+		&order.Entry,
+		&order.Locale,
+		&order.InternalSignature,
+		&order.CustomerID,
+		&order.DeliveryService,
+		&order.Shardkey,
+		&order.SMID,
+		&order.DateCreated,
+		&order.OofShard,
+	)
+	if err != nil {
+		logger.Warn("Error while geting data from wb.orders")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	err = p.pool.QueryRow(ctx, `
+		SELECT
+		  name, phone, zip, city, address, region, email
+		FROM wb.delivery
+		WHERE order_id = $1
+	`, id).Scan(
+		&order.Delivery.Name,
+		&order.Delivery.Phone,
+		&order.Delivery.Zip,
+		&order.Delivery.City,
+		&order.Delivery.Address,
+		&order.Delivery.Region,
+		&order.Delivery.Email,
+	)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	}
+
+	err = p.pool.QueryRow(ctx, `
+		SELECT
+		  transaction, request_id, currency, provider,
+		  amount_cents, payment_dt, bank,
+		  delivery_cost_cents, goods_total_cents, custom_fee_cents
+		FROM wb.payment
+		WHERE order_id = $1
+	`, id).Scan(
+		&order.Payment.Transaction,
+		&order.Payment.RequestID,
+		&order.Payment.Currency,
+		&order.Payment.Provider,
+		&order.Payment.Amount,
+		&order.Payment.PaymentDT,
+		&order.Payment.Bank,
+		&order.Payment.DeliveryCost,
+		&order.Payment.GoodsTotal,
+		&order.Payment.CustomFee,
+	)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	}
+
+	rows, err := p.pool.Query(ctx, `
+		SELECT
+		  chrt_id, track_number, price_cents, rid, name, sale, size, total_price_cents, nm_id, brand, status
+		FROM wb.items
+		WHERE order_id = $1
+		ORDER BY chrt_id
+	`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []domain.ItemData
+	for rows.Next() {
+		var it domain.ItemData
+		err = rows.Scan(
+			&it.ChrtID,
+			&it.TrackNumber,
+			&it.Price,
+			&it.Rid,
+			&it.Name,
+			&it.Sale,
+			&it.Size,
+			&it.TotalPrice,
+			&it.NmID,
+			&it.Brand,
+			&it.Status,
+		)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	order.Items = items
+	order.OrderID = id
+
+	return order, nil
 }
