@@ -14,6 +14,7 @@ import (
 
 type OrderRepo interface {
 	AddOrder(ctx context.Context, order *domain.Order) error
+	GetOrderByUID(ctx context.Context, uid string) (*domain.Order, error)
 	GetOrderById(ctx context.Context, id uuid.UUID) (*domain.Order, error)
 	ListRecentPayloads(ctx context.Context, limit int) ([]struct {
 		ID      uuid.UUID
@@ -293,6 +294,18 @@ func (p *OrderRepository) GetOrderById(ctx context.Context, id uuid.UUID) (*doma
 	order.OrderID = id
 
 	return order, nil
+}
+
+func (p *OrderRepository) GetOrderByUID(ctx context.Context, uid string) (*domain.Order, error) {
+	var id uuid.UUID
+	err := p.pool.QueryRow(ctx, `SELECT id FROM wb.orders WHERE order_uid = $1`, uid).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return p.GetOrderById(ctx, id)
 }
 
 func (p *OrderRepository) ListRecentPayloads(ctx context.Context, limit int) ([]struct {

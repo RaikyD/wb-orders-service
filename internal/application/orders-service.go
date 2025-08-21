@@ -12,17 +12,19 @@ import (
 )
 
 type OrdersService struct {
-	repo repository.OrderRepo
-	mu   sync.RWMutex
-	byID map[uuid.UUID]*domain.Order
+	repo  repository.OrderRepo
+	mu    sync.RWMutex
+	byUID map[string]*domain.Order
 }
 
 func NewOrdersService(r repository.OrderRepo) *OrdersService {
 	return &OrdersService{
-		repo: r,
-		byID: make(map[uuid.UUID]*domain.Order),
+		repo:  r,
+		byUID: make(map[string]*domain.Order),
 	}
 }
+
+var ErrOrderAlreadyExists = errors.New("order already exists")
 
 func (s *OrdersService) AddOrder(ctx context.Context, order *domain.Order) error {
 	err := s.repo.AddOrder(ctx, order)
@@ -35,7 +37,7 @@ func (s *OrdersService) AddOrder(ctx context.Context, order *domain.Order) error
 			}
 			if e == nil && o != nil {
 				s.mu.Lock()
-				s.byID[o.OrderID] = o
+				s.byUID[o.OrderUID] = o
 				s.mu.Unlock()
 			}
 			return nil
@@ -45,22 +47,22 @@ func (s *OrdersService) AddOrder(ctx context.Context, order *domain.Order) error
 	}
 
 	s.mu.Lock()
-	s.byID[order.OrderID] = order
+	s.byUID[order.OrderUID] = order
 	s.mu.Unlock()
 	return nil
 }
 
-func (s *OrdersService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Order, error) {
+func (s *OrdersService) GetbyUID(ctx context.Context, id string) (*domain.Order, error) {
 	s.mu.RLock()
-	if o, ok := s.byID[id]; ok {
+	if o, ok := s.byUID[id]; ok {
 		s.mu.RUnlock()
 		return o, nil
 	}
 	s.mu.RUnlock()
 
-	o, err := s.repo.GetOrderById(ctx, id)
+	o, err := s.repo.GetOrderByUID(ctx, id)
 	if err != nil {
-		logger.Warn("Order service getbyid trouble")
+		logger.Warn("Order service getbyUID trouble")
 		return nil, err
 	}
 	if o == nil {
@@ -68,7 +70,7 @@ func (s *OrdersService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Orde
 	}
 
 	s.mu.Lock()
-	s.byID[o.OrderID] = o
+	s.byUID[o.OrderUID] = o
 	s.mu.Unlock()
 	return o, nil
 }
@@ -80,8 +82,7 @@ func (s *OrdersService) RestoreCache(ctx context.Context, limit int) error {
 		return err
 	}
 
-	// Сборка новых данных в локальную мапу (чтобы держать Lock меньше)
-	tmp := make(map[uuid.UUID]*domain.Order, len(rows))
+	tmp := make(map[string]*domain.Order, len(rows))
 	for _, r := range rows {
 		var o domain.Order
 		if len(r.Payload) > 0 {
@@ -90,7 +91,6 @@ func (s *OrdersService) RestoreCache(ctx context.Context, limit int) error {
 				continue
 			}
 		} else {
-			// Если payload пуст — можно добрать из нормализованных таблиц:
 			oo, err := s.repo.GetOrderById(ctx, r.ID)
 			if err != nil || oo == nil {
 				logger.Warn("failed to load order by id; skip")
@@ -100,11 +100,11 @@ func (s *OrdersService) RestoreCache(ctx context.Context, limit int) error {
 		}
 
 		o.OrderID = r.ID
-		tmp[o.OrderID] = &o
+		tmp[o.OrderUID] = &o
 	}
 
 	s.mu.Lock()
-	s.byID = tmp
+	s.byUID = tmp
 	s.mu.Unlock()
 	return nil
 }
