@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"time"
 )
 
 type OrderRepo interface {
@@ -340,6 +341,43 @@ func (p *OrderRepository) ListRecentPayloads(ctx context.Context, limit int) ([]
 			ID      uuid.UUID
 			Payload []byte
 		}{ID: id, Payload: payload})
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return out, nil
+}
+
+type OrderBrief struct {
+	ID          uuid.UUID `json:"id"`
+	OrderUID    string    `json:"order_uid"`
+	TrackNumber string    `json:"track_number"`
+	CustomerID  string    `json:"customer_id"`
+	DateCreated time.Time `json:"date_created"`
+	AmountCents *int      `json:"amount_cents"`
+}
+
+func (p *OrderRepository) ListOrdersBrief(ctx context.Context, limit, offset int) ([]OrderBrief, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT o.id, o.order_uid, o.track_number, o.customer_id, o.date_created,
+		       pay.amount_cents
+		FROM wb.orders o
+		LEFT JOIN wb.payment pay ON pay.order_id = o.id
+		ORDER BY o.created_at DESC
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []OrderBrief
+	for rows.Next() {
+		var r OrderBrief
+		if err := rows.Scan(&r.ID, &r.OrderUID, &r.TrackNumber, &r.CustomerID, &r.DateCreated, &r.AmountCents); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	if rows.Err() != nil {
 		return nil, rows.Err()

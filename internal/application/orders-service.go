@@ -24,6 +24,10 @@ func NewOrdersService(r repository.OrderRepo) *OrdersService {
 	}
 }
 
+func (s *OrdersService) Repo() repository.OrderRepo {
+	return s.repo
+}
+
 var ErrOrderAlreadyExists = errors.New("order already exists")
 
 func (s *OrdersService) AddOrder(ctx context.Context, order *domain.Order) error {
