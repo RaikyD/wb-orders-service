@@ -12,15 +12,10 @@ func Init() {
 	log = l.Sugar()
 }
 
-func Info(info string, args ...interface{}) {
-	log.Info(info,
-		args,
-	)
+func Info(msg string, kv ...interface{}) {
+	log.Infow(msg, kv...)
 }
 
-func Warn(info string, args ...interface{}) {
-	log.Warn(
-		info,
-		args,
-	)
+func Warn(msg string, kv ...interface{}) {
+	log.Warnw(msg, kv...)
 }

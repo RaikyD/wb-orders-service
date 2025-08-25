@@ -8,7 +8,7 @@ import (
 
 func DecodeJSON(r io.Reader, v any) error {
 	dec := json.NewDecoder(r)
-	dec.DisallowUnknownFields() // полезно, чтобы ловить опечатки в ключах
+	dec.DisallowUnknownFields()
 	return dec.Decode(v)
 }
 
