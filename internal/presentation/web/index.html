@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8"/>
+    <title>Orders Demo</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;padding:24px;max-width:1200px;margin:auto}
+        h1{margin:0 0 8px}
+        .row{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+        input,button,select{padding:8px 10px}
+        table{border-collapse:collapse;width:100%;margin-top:12px}
+        th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:14px}
+        th{background:#fafafa}
+        pre{border:1px solid #ddd;padding:12px;white-space:pre-wrap}
+        .card{border:1px solid #eee;padding:12px;border-radius:10px}
+    </style>
+</head>
+<body>
+<h1>Orders demo</h1>
+
+<div class="card">
+    <h3>Поиск заказа по UID</h3>
+    <div class="row">
+        <input id="uid" placeholder="enter order_uid" style="min-width:320px"/>
+        <button onclick="findByUID()">Найти</button>
+    </div>
+    <pre id="orderOut">—</pre>
+</div>
+
+<div class="card" style="margin-top:16px">
+    <h3>Генератор заказов</h3>
+    <div class="row">
+        <label>Сколько создать:
+            <input id="genCount" type="number" value="3" min="1" max="1000" style="width:100px"/>
+        </label>
+        <button onclick="generate()">Сгенерировать</button>
+        <button onclick="loadTable()">Обновить таблицу</button>
+    </div>
+    <div id="genStatus">—</div>
+</div>
+
+<div class="card" style="margin-top:16px">
+    <h3>Загрузка заказа из файла <code>model.json</code></h3>
+    <div class="row">
+        <input id="file" type="file" accept=".json"/>
+        <button onclick="uploadFile()">Загрузить</button>
+        <button onclick="uploadRaw()">Загрузить как текст JSON</button>
+    </div>
+    <div id="uploadStatus">—</div>
+</div>
+
+<div class="card" style="margin-top:16px">
+    <h3>Последние заказы</h3>
+    <table id="tbl">
+        <thead>
+        <tr>
+            <th>#</th>
+            <th>id</th>
+            <th>order_uid</th>
+            <th>track_number</th>
+            <th>customer_id</th>
+            <th>date_created (UTC)</th>
+            <th>amount (cents)</th>
+        </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<script>
+    async function findByUID(){
+        const uid = document.getElementById('uid').value.trim();
+        const out = document.getElementById('orderOut');
+        if(!uid){ out.textContent='Введите UID'; return; }
+        out.textContent='Loading...';
+        const res = await fetch('/orders/'+encodeURIComponent(uid));
+        const text = await res.text();
+        try{ out.textContent = JSON.stringify(JSON.parse(text), null, 2); }
+        catch{ out.textContent = text; }
+    }
+
+    async function generate(){
+        const n = Math.max(1, Math.min(1000, +document.getElementById('genCount').value || 1));
+        const box = document.getElementById('genStatus');
+        box.textContent = 'Создаём...';
+        const res = await fetch('/orders/generate?count='+n, {method:'POST'});
+        const j = await res.json().catch(()=>({}));
+        box.textContent = res.ok ? ('OK: '+(j.created_uids?.length||0)+' шт.') : ('Ошибка: '+(j.error||res.status));
+        loadTable();
+    }
+
+    async function uploadFile(){
+        const f = document.getElementById('file').files[0];
+        const box = document.getElementById('uploadStatus');
+        if(!f){ box.textContent='Выберите файл'; return; }
+        const fd = new FormData();
+        fd.append('file', f);
+        const res = await fetch('/orders', {method:'POST', body:fd});
+        const j = await res.json().catch(()=>({}));
+        box.textContent = res.ok ? ('OK: '+j.order_uid) : ('Ошибка: '+(j.error||res.status));
+        loadTable();
+    }
+
+    async function uploadRaw(){
+        const f = document.getElementById('file').files[0];
+        const box = document.getElementById('uploadStatus');
+        if(!f){ box.textContent='Выберите файл'; return; }
+        const txt = await f.text();
+        const res = await fetch('/orders', {method:'POST', headers:{'Content-Type':'text/plain'}, body:txt});
+        const j = await res.json().catch(()=>({}));
+        box.textContent = res.ok ? ('OK: '+j.order_uid) : ('Ошибка: '+(j.error||res.status));
+        loadTable();
+    }
+
+    async function loadTable(){
+        const tbody = document.querySelector('#tbl tbody');
+        tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+        const res = await fetch('/orders?limit=100');
+        const j = await res.json().catch(()=>({rows:[]}));
+        const rows = j.rows || [];
+        tbody.innerHTML = rows.map((r,i)=>`
+    <tr>
+      <td>${i+1}</td>
+      <td title="${r.id}">${r.id.slice(0,8)}…</td>
+      <td><a href="#" onclick="document.getElementById('uid').value='${r.order_uid}'; findByUID(); return false;">${r.order_uid}</a></td>
+      <td>${r.track_number||''}</td>
+      <td>${r.customer_id||''}</td>
+      <td>${r.date_created||''}</td>
+      <td>${r.amount_cents??''}</td>
+    </tr>`).join('');
+    }
+    loadTable();
+</script>
+</body>
+</html>
