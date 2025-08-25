@@ -80,15 +80,7 @@
         catch{ out.textContent = text; }
     }
 
-    async function generate(){
-        const n = Math.max(1, Math.min(1000, +document.getElementById('genCount').value || 1));
-        const box = document.getElementById('genStatus');
-        box.textContent = 'Создаём...';
-        const res = await fetch('/orders/generate?count='+n, {method:'POST'});
-        const j = await res.json().catch(()=>({}));
-        box.textContent = res.ok ? ('OK: '+(j.created_uids?.length||0)+' шт.') : ('Ошибка: '+(j.error||res.status));
-        loadTable();
-    }
+
 
     async function uploadFile(){
         const f = document.getElementById('file').files[0];
@@ -102,6 +94,38 @@
         loadTable();
     }
 
+
+    async function generate() {
+        const n = Math.max(1, Math.min(1000, +document.getElementById('genCount').value || 1));
+        const box = document.getElementById('genStatus');
+
+        box.textContent = 'Создаём...';
+        const res = await fetch('/orders/generate?count='+n, { method:'POST' });
+
+        let j = null;
+        try { j = await res.json(); } catch (_) { j = {}; }
+
+        // асинхронный ответ от сервера: ожидаем enqueued_uids
+        const queued = Array.isArray(j.enqueued_uids) ? j.enqueued_uids.length : 0;
+        // на случай, если бэкенд ещё синхронный — поддержим created_uids
+        const created = Array.isArray(j.created_uids) ? j.created_uids.length : 0;
+        const count = queued || created || 0;
+
+        if (res.ok) {
+        if (j.status === 'accepted' || queued) {
+        box.textContent = `В очередь: ${count} шт. Появятся в таблице через секунду...`;
+        } else {
+            box.textContent = `OK: ${count} шт.`;
+        }
+        } else {
+            box.textContent = `Ошибка: ${j.error || res.status}`;
+        }
+
+        // обновим таблицу сразу и через небольшой интервал (сообщения успеют обработаться consumer'ом)
+        loadTable();
+        setTimeout(loadTable, 1000);
+        setTimeout(loadTable, 3000);
+    }
     async function uploadRaw(){
         const f = document.getElementById('file').files[0];
         const box = document.getElementById('uploadStatus');

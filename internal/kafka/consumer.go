@@ -31,41 +31,76 @@ func StartConsumer(ctx context.Context, svc *application.OrdersService, cfg Cons
 		ReadLagInterval: -1,
 	})
 
+	logger.Info("kafka consumer starting", "brokers", cfg.Brokers, "topic", cfg.Topic, "group", cfg.GroupID)
+
 	go func() {
 		defer r.Close()
 
 		backoff := time.Millisecond * 300
 		for {
+			//m, err := r.FetchMessage(ctx)
+			//if err != nil {
+			//	if ctx.Err() != nil {
+			//		return
+			//	}
+			//	logger.Warn("kafka fetch error", "err", err)
+			//	time.Sleep(backoff)
+			//	continue
+			//}
+			//logger.Info("order fetched", "partition", m.Partition, "offset", m.Offset)
+			//var o domain.Order
+			//if err = json.Unmarshal(m.Value, &o); err != nil {
+			//	logger.Info("kafka invalid json. skip and commit")
+			//
+			//	_ = r.CommitMessages(ctx, m)
+			//	continue
+			//}
+			//logger.Info("order structure is correct || passed Unmarshal check")
+			//if err = svc.AddOrder(ctx, &o); err != nil {
+			//	logger.Warn("kafka add order fail, will retry")
+			//	time.Sleep(backoff)
+			//	continue
+			//}
+			//logger.Info("Order successfully added", "uid", o.OrderUID)
+			//
+			//if err := r.CommitMessages(ctx, m); err != nil {
+			//	logger.Warn("[kafka] commit failed", "err", err)
+			//} else {
+			//	logger.Info("[kafka] committed",
+			//		"topic", m.Topic, "partition", m.Partition, "offset", m.Offset, "uid", o.OrderUID)
+			//}
 			m, err := r.FetchMessage(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Info("kafka fetch error")
+				logger.Warn("kafka fetch error", "err", err) // было без err
 				time.Sleep(backoff)
 				continue
 			}
+			logger.Info("order fetched", "partition", m.Partition, "offset", m.Offset)
 
 			var o domain.Order
 			if err = json.Unmarshal(m.Value, &o); err != nil {
-				logger.Info("kafka invalid json. skip and commit")
-
+				logger.Warn("kafka invalid json. skip and commit", "err", err)
 				_ = r.CommitMessages(ctx, m)
 				continue
 			}
 
 			if err = svc.AddOrder(ctx, &o); err != nil {
-				logger.Warn("kafka add order fail, will retry")
+				logger.Warn("kafka add order fail, will retry", "err", err)
 				time.Sleep(backoff)
 				continue
 			}
 
+			logger.Info("Order successfully added", "uid", o.OrderUID)
+
 			if err := r.CommitMessages(ctx, m); err != nil {
-				logger.Info("[kafka] commit failed:", err)
+				logger.Warn("[kafka] commit failed", "err", err)
 			} else {
-				logger.Info("[kafka] committed: topic=%s partition=%d offset=%d uid=%s\n",
-					m.Topic, m.Partition, m.Offset, o.OrderUID)
+				logger.Info("[kafka] committed", "topic", m.Topic, "partition", m.Partition, "offset", m.Offset, "uid", o.OrderUID)
 			}
+
 		}
 
 	}()

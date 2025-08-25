@@ -2,14 +2,18 @@ package presentation
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
-	"errors"
 	"github.com/RaikyD/wb-orders-service/internal/application"
 	"github.com/RaikyD/wb-orders-service/internal/domain"
+	"github.com/RaikyD/wb-orders-service/internal/kafka"
 	"github.com/RaikyD/wb-orders-service/internal/logger"
 	"github.com/RaikyD/wb-orders-service/internal/presentation/helpers"
+	"github.com/RaikyD/wb-orders-service/internal/repository"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"io"
+	"math/rand"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -19,17 +23,19 @@ import (
 )
 
 type OrdersHandler struct {
-	svc application.OrdersService
+	svc  *application.OrdersService
+	prod *kafka.Producer
 }
 
-func NewOrdersHandler(svc application.OrdersService) *OrdersHandler {
-	return &OrdersHandler{svc: svc}
+func NewOrdersHandler(svc application.OrdersService, prod *kafka.Producer) *OrdersHandler {
+	return &OrdersHandler{svc: &svc, prod: prod}
 }
 
 func (h *OrdersHandler) Register(r chi.Router) {
 	r.Post("/orders", h.CreateOrder)
-	r.Get("/orders/{uuid}", h.GetOrder)
+	r.Get("/orders/{uid}", h.GetOrderByUID) // было {uuid}
 	r.Post("/orders/generate", h.GenerateOrders)
+	r.Get("/orders", h.ListOrdersBrief) // НОВОЕ
 }
 
 // тут мы будем рассматривать 3 юзер кейса:
@@ -85,26 +91,21 @@ func (h *OrdersHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		helpers.HttpError(w, http.StatusBadRequest, "invalid JSON: "+readErr.Error())
 		return
 	}
-
-	// Наличие всех ключей
 	if strings.TrimSpace(ord.OrderUID) == "" {
 		helpers.HttpError(w, http.StatusBadRequest, "order_uid is required")
 		return
 	}
 
-	if err := h.svc.AddOrder(r.Context(), &ord); err != nil {
-		helpers.HttpError(w, http.StatusInternalServerError, "failed to add order")
+	logger.Info("Uploading order on handler", "order", ord)
+	if err := h.prod.PublishOrder(r.Context(), ord); err != nil {
+		helpers.HttpError(w, http.StatusBadGateway, "kafka publish failed: "+err.Error())
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusCreated, map[string]any{
-		"status":    "ok",
+	helpers.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"status":    "accepted",
 		"order_uid": ord.OrderUID,
 	})
-
-}
-
-func (h *OrdersHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
 
 }
 
@@ -117,23 +118,24 @@ func (h *OrdersHandler) GenerateOrders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var created []string
+	logger.Info("Starting generating orders")
+	var published []string
 	for i := 0; i < n; i++ {
 		o := genDemoOrder()
-		if err := h.svc.AddOrder(r.Context(), &o); err != nil {
-			// идемпотентность: если дубль — просто пропускаем
-			if !errors.Is(err, application.ErrOrderAlreadyExists) {
-				logger.Warn("generate: add failed", "err", err)
-			}
+		if err := h.prod.PublishOrder(r.Context(), o); err != nil {
+			logger.Warn("generate: publish failed", "err", err)
 			continue
 		}
-		created = append(created, o.OrderUID)
+		logger.Info("Order added to topic", "order", o)
+
+		published = append(published, o.OrderUID)
 	}
 
-	helpers.WriteJSON(w, http.StatusCreated, map[string]any{
-		"status":       "ok",
-		"created_uids": created,
+	helpers.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"status":        "accepted",
+		"enqueued_uids": published,
 	})
+
 }
 
 func (h *OrdersHandler) GetOrderByUID(w http.ResponseWriter, r *http.Request) {
@@ -157,13 +159,15 @@ func (h *OrdersHandler) GetOrderByUID(w http.ResponseWriter, r *http.Request) {
 
 func genDemoOrder() domain.Order {
 	now := time.Now().UTC()
+	id := "customer-" + strconv.Itoa(rand.Intn(1001))
+	amount := rand.Intn(10000001)
 	return domain.Order{
-		OrderUID:          "demo-" + strconv.FormatInt(now.UnixNano(), 10),
+		OrderUID:          uuid.New().String(),
 		TrackNumber:       "WB" + strconv.FormatInt(now.Unix()%1_000_000, 10),
 		Entry:             "WBIL",
 		Locale:            "ru",
 		InternalSignature: "",
-		CustomerID:        "customer-1",
+		CustomerID:        id,
 		DeliveryService:   "meest",
 		Shardkey:          "0",
 		SMID:              0,
@@ -183,7 +187,7 @@ func genDemoOrder() domain.Order {
 			RequestID:    "",
 			Currency:     "RUB",
 			Provider:     "wbpay",
-			Amount:       10000,
+			Amount:       amount,
 			PaymentDT:    now.Unix(),
 			Bank:         "alpha",
 			DeliveryCost: 200,
@@ -206,4 +210,34 @@ func genDemoOrder() domain.Order {
 			},
 		},
 	}
+}
+
+func (h *OrdersHandler) ListOrdersBrief(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	type lister interface {
+		ListOrdersBrief(ctx context.Context, limit, offset int) ([]repository.OrderBrief, error)
+	}
+	if repo, ok := h.svc.Repo().(lister); ok {
+		rows, err := repo.ListOrdersBrief(r.Context(), limit, offset)
+		if err != nil {
+			helpers.HttpError(w, http.StatusInternalServerError, "failed to list orders")
+			return
+		}
+		helpers.WriteJSON(w, http.StatusOK, map[string]any{"rows": rows})
+		return
+	}
+
+	helpers.HttpError(w, http.StatusNotImplemented, "list not supported")
 }
